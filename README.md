@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>比赛积分管理系统</title>
+    <title>比赛积分管理系统 - 数据互通版</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
+        /* 保持原有的CSS样式不变 */
         * {
             margin: 0;
             padding: 0;
@@ -336,6 +337,12 @@
             display: none;
         }
         
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: var(--gray);
+        }
+        
         @media (max-width: 768px) {
             .col {
                 flex: 100%;
@@ -359,12 +366,16 @@
             }
         }
     </style>
+    
+    <!-- 引入 Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore-compat.js"></script>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1><i class="fas fa-trophy"></i> 铁拳相扑锦标赛积分管理系统</h1>
-            <p class="subtitle">注册账号，查看积分排名</p>
+            <h1><i class="fas fa-trophy"></i> 铁拳相扑锦标赛积分排名</h1>
+            <p class="subtitle">所有用户数据实时同步，积分排名全局可见</p>
         </header>
         
         <!-- 登录页面 -->
@@ -394,7 +405,8 @@
                         <p>1. 每个用户可以注册一个唯一的用户名账号。</p>
                         <p>2. 管理员可以给用户分配积分，积分用于比赛排名。</p>
                         <p>3. 系统会实时更新和显示比赛排名。</p>
-                        <p>4. 用户名使用自己的游戏ID，带上后缀。</p>
+                        <p>4. 所有用户数据实时同步，全局可见。</p>
+                        <p>5. 用户名使用自己的游戏ID，带上后缀</p>
                     </div>
                 </div>
             </div>
@@ -461,7 +473,10 @@
             
             <div class="card">
                 <h2 class="card-title"><i class="fas fa-crown"></i> 当前排名</h2>
-                <table id="ranking-table">
+                <div id="ranking-loading" class="loading">
+                    <i class="fas fa-spinner fa-spin"></i> 加载排名中...
+                </div>
+                <table id="ranking-table" style="display: none;">
                     <thead>
                         <tr>
                             <th>排名</th>
@@ -511,7 +526,10 @@
                 <div class="col">
                     <div class="card">
                         <h2 class="card-title"><i class="fas fa-crown"></i> 当前排名</h2>
-                        <table id="admin-ranking-table">
+                        <div id="admin-ranking-loading" class="loading">
+                            <i class="fas fa-spinner fa-spin"></i> 加载排名中...
+                        </div>
+                        <table id="admin-ranking-table" style="display: none;">
                             <thead>
                                 <tr>
                                     <th>排名</th>
@@ -545,7 +563,10 @@
                     
                     <div class="card">
                         <h2 class="card-title"><i class="fas fa-users"></i> 用户管理</h2>
-                        <table id="users-table">
+                        <div id="users-loading" class="loading">
+                            <i class="fas fa-spinner fa-spin"></i> 加载用户中...
+                        </div>
+                        <table id="users-table" style="display: none;">
                             <thead>
                                 <tr>
                                     <th>用户名</th>
@@ -569,15 +590,26 @@
     </div>
 
     <script>
-        // 模拟数据存储
-        let users = JSON.parse(localStorage.getItem('users')) || [
-            { id: 1, username: "admin", password: "admin123", role: "admin", points: 0 }
-        ];
+        // Firebase配置 - 您需要替换为您的实际配置
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT.firebaseapp.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT.appspot.com",
+            messagingSenderId: "YOUR_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
+        // 初始化Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
         
         // 管理员代码
         const ADMIN_CODE = "admin2024";
         
         let currentUser = null;
+        let users = [];
+        let unsubscribeUsers = null;
         
         // DOM元素
         const loginPage = document.getElementById('login-page');
@@ -599,8 +631,18 @@
         
         // 初始化页面
         function initPage() {
-            updateLocalStorage();
-            showPage('login-page');
+            // 尝试从本地存储加载当前用户
+            const savedUser = localStorage.getItem('currentUser');
+            if (savedUser) {
+                currentUser = JSON.parse(savedUser);
+                if (currentUser.role === 'admin') {
+                    showAdminHome();
+                } else {
+                    showUserHome();
+                }
+            } else {
+                showPage('login-page');
+            }
         }
         
         // 显示特定页面
@@ -614,9 +656,61 @@
             document.getElementById(pageId).classList.add('active');
         }
         
-        // 更新本地存储
-        function updateLocalStorage() {
-            localStorage.setItem('users', JSON.stringify(users));
+        // 显示用户主页
+        function showUserHome() {
+            updateUserHome();
+            setupUsersListener();
+            showPage('user-home');
+        }
+        
+        // 显示管理员主页
+        function showAdminHome() {
+            updateAdminHome();
+            setupUsersListener();
+            showPage('admin-home');
+        }
+        
+        // 设置用户数据监听器
+        function setupUsersListener() {
+            // 如果已经有监听器，先取消
+            if (unsubscribeUsers) {
+                unsubscribeUsers();
+            }
+            
+            // 监听users集合的变化
+            unsubscribeUsers = db.collection('users').onSnapshot(snapshot => {
+                users = [];
+                snapshot.forEach(doc => {
+                    users.push({
+                        id: doc.id,
+                        ...doc.data()
+                    });
+                });
+                
+                // 更新UI
+                updateRankingTable();
+                updateUsersTable();
+                updateAssignUserSelect();
+                
+                if (currentUser) {
+                    if (currentUser.role === 'admin') {
+                        updateAdminHome();
+                    } else {
+                        updateUserHome();
+                    }
+                }
+                
+                // 隐藏加载指示器
+                document.getElementById('ranking-loading').style.display = 'none';
+                document.getElementById('ranking-table').style.display = 'table';
+                document.getElementById('admin-ranking-loading').style.display = 'none';
+                document.getElementById('admin-ranking-table').style.display = 'table';
+                document.getElementById('users-loading').style.display = 'none';
+                document.getElementById('users-table').style.display = 'table';
+            }, error => {
+                console.error("监听用户数据失败:", error);
+                alert("加载用户数据失败，请刷新页面重试");
+            });
         }
         
         // 更新排名表格
@@ -717,7 +811,7 @@
                 
                 // 操作
                 const actionCell = document.createElement('td');
-                if (user.id !== 1 && user.id !== currentUser.id) { // 不能删除默认管理员和自己
+                if (user.id !== '1' && user.id !== currentUser.id) { // 不能删除默认管理员和自己
                     const deleteBtn = document.createElement('button');
                     deleteBtn.classList.add('btn-danger');
                     deleteBtn.innerHTML = '<i class="fas fa-trash"></i> 删除';
@@ -785,12 +879,14 @@
         // 删除用户
         function deleteUser(userId) {
             if (confirm('确定要删除这个用户吗？此操作不可恢复。')) {
-                users = users.filter(user => user.id !== userId);
-                updateLocalStorage();
-                updateUsersTable();
-                updateAssignUserSelect();
-                updateRankingTable();
-                alert('用户已成功删除！');
+                db.collection('users').doc(userId).delete()
+                    .then(() => {
+                        alert('用户已成功删除！');
+                    })
+                    .catch(error => {
+                        console.error("删除用户失败:", error);
+                        alert('删除用户失败，请重试');
+                    });
             }
         }
         
@@ -812,7 +908,8 @@
             }
             
             // 检查用户名是否已存在
-            if (users.some(user => user.username === username)) {
+            const usernameExists = users.some(user => user.username === username);
+            if (usernameExists) {
                 alert('用户名已存在，请选择其他用户名！');
                 return;
             }
@@ -827,25 +924,30 @@
             
             // 创建新用户
             const newUser = {
-                id: users.length > 0 ? Math.max(...users.map(u => u.id)) + 1 : 1,
                 username: username,
                 password: password,
                 role: role,
                 points: 0
             };
             
-            users.push(newUser);
-            updateLocalStorage();
-            
-            alert(`注册成功！您已注册为${role === 'admin' ? '管理员' : '普通用户'}。`);
-            
-            // 清空表单并返回登录页面
-            document.getElementById('username').value = '';
-            document.getElementById('password').value = '';
-            document.getElementById('confirm-password').value = '';
-            document.getElementById('admin-code').value = '';
-            
-            showPage('login-page');
+            // 添加到Firestore
+            db.collection('users').add(newUser)
+                .then((docRef) => {
+                    newUser.id = docRef.id;
+                    alert(`注册成功！您已注册为${role === 'admin' ? '管理员' : '普通用户'}。`);
+                    
+                    // 清空表单并返回登录页面
+                    document.getElementById('username').value = '';
+                    document.getElementById('password').value = '';
+                    document.getElementById('confirm-password').value = '';
+                    document.getElementById('admin-code').value = '';
+                    
+                    showPage('login-page');
+                })
+                .catch(error => {
+                    console.error("注册用户失败:", error);
+                    alert('注册失败，请重试');
+                });
         });
         
         // 登录功能
@@ -858,24 +960,21 @@
                 return;
             }
             
-            // 验证用户
+            // 在用户列表中查找匹配的用户
             const user = users.find(u => u.username === username && u.password === password);
             
             if (user) {
                 currentUser = user;
+                // 保存当前用户到本地存储
+                localStorage.setItem('currentUser', JSON.stringify(currentUser));
+                
                 alert(`登录成功！欢迎 ${user.username}`);
                 
                 // 根据用户角色显示相应主页
                 if (user.role === 'admin') {
-                    updateAdminHome();
-                    updateRankingTable();
-                    updateUsersTable();
-                    updateAssignUserSelect();
-                    showPage('admin-home');
+                    showAdminHome();
                 } else {
-                    updateUserHome();
-                    updateRankingTable();
-                    showPage('user-home');
+                    showUserHome();
                 }
             } else {
                 alert('用户名或密码错误！');
@@ -893,7 +992,7 @@
                 return;
             }
             
-            const userId = parseInt(assignUserSelect.value);
+            const userId = assignUserSelect.value;
             const points = parseInt(document.getElementById('assign-points').value);
             
             if (!userId) {
@@ -909,17 +1008,20 @@
             // 更新用户积分
             const user = users.find(u => u.id === userId);
             if (user) {
-                user.points += points;
-                updateLocalStorage();
-                alert(`成功给 ${user.username} 分配 ${points} 积分！`);
-                
-                // 清空表单
-                document.getElementById('assign-points').value = '';
-                
-                // 更新页面
-                updateRankingTable();
-                updateUsersTable();
-                updateAdminHome();
+                const newPoints = user.points + points;
+                db.collection('users').doc(userId).update({
+                    points: newPoints
+                })
+                .then(() => {
+                    alert(`成功给 ${user.username} 分配 ${points} 积分！`);
+                    
+                    // 清空表单
+                    document.getElementById('assign-points').value = '';
+                })
+                .catch(error => {
+                    console.error("分配积分失败:", error);
+                    alert('分配积分失败，请重试');
+                });
             }
         });
         
@@ -935,16 +1037,41 @@
         
         userLogout.addEventListener('click', function() {
             currentUser = null;
+            localStorage.removeItem('currentUser');
+            if (unsubscribeUsers) {
+                unsubscribeUsers();
+            }
             showPage('login-page');
         });
         
         adminLogout.addEventListener('click', function() {
             currentUser = null;
+            localStorage.removeItem('currentUser');
+            if (unsubscribeUsers) {
+                unsubscribeUsers();
+            }
             showPage('login-page');
         });
         
         // 初始化页面
         initPage();
+        
+        // 初始化默认管理员账户（如果不存在）
+        db.collection('users').doc('1').get()
+            .then(doc => {
+                if (!doc.exists) {
+                    // 创建默认管理员
+                    db.collection('users').doc('1').set({
+                        username: 'admin',
+                        password: 'admin123',
+                        role: 'admin',
+                        points: 0
+                    });
+                }
+            })
+            .catch(error => {
+                console.error("初始化默认管理员失败:", error);
+            });
     </script>
 </body>
 </html>
